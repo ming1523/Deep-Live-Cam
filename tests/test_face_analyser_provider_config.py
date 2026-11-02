@@ -2,6 +2,8 @@ import importlib
 import sys
 import types
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 
 
 def _install_import_stubs():
@@ -50,30 +52,43 @@ def _install_import_stubs():
     )
 
 
-def _load_face_analyser():
-    _install_import_stubs()
-    sys.modules.pop("modules.face_analyser", None)
-    return importlib.import_module("modules.face_analyser")
+@contextmanager
+def _patched_face_analyser():
+    """Import ``modules.face_analyser`` with its heavy dependencies stubbed.
+
+    The stubs only live for the duration of the ``with`` block: ``patch.dict``
+    restores the previous ``sys.modules`` entries on exit, so a stubbed module
+    such as ``modules.processors.frame._onnx_enhancer`` never leaks into the
+    tests that run afterwards in the same process.
+    """
+    with patch.dict(sys.modules):
+        _install_import_stubs()
+        sys.modules.pop("modules.face_analyser", None)
+        yield importlib.import_module("modules.face_analyser")
 
 
 class FaceAnalyserProviderConfigTests(unittest.TestCase):
     def test_uses_cpu_provider_for_directml_face_analysis(self):
-        face_analyser = _load_face_analyser()
-        face_analyser.modules.globals.execution_providers = ["DmlExecutionProvider"]
+        with _patched_face_analyser() as face_analyser:
+            face_analyser.modules.globals.execution_providers = [
+                "DmlExecutionProvider"
+            ]
 
-        self.assertEqual(
-            face_analyser.build_face_analyser_provider_config(),
-            ["CPUExecutionProvider"],
-        )
+            self.assertEqual(
+                face_analyser.build_face_analyser_provider_config(),
+                ["CPUExecutionProvider"],
+            )
 
     def test_preserves_existing_provider_config_for_non_directml(self):
-        face_analyser = _load_face_analyser()
-        face_analyser.modules.globals.execution_providers = ["CUDAExecutionProvider"]
+        with _patched_face_analyser() as face_analyser:
+            face_analyser.modules.globals.execution_providers = [
+                "CUDAExecutionProvider"
+            ]
 
-        self.assertEqual(
-            face_analyser.build_face_analyser_provider_config(),
-            ["CUDAExecutionProvider"],
-        )
+            self.assertEqual(
+                face_analyser.build_face_analyser_provider_config(),
+                ["CUDAExecutionProvider"],
+            )
 
 
 if __name__ == "__main__":
