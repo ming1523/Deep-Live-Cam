@@ -3,6 +3,19 @@ import sys
 import types
 import unittest
 
+# Project modules that ``_install_import_stubs`` replaces with stubs.  They are
+# restored after every test so later tests (and any real import of e.g.
+# ``modules.processors.frame.face_enhancer_gpen256``) still see the genuine
+# module instead of a stub that lacks most of its functions.
+_STUBBED_PROJECT_MODULES = (
+    "modules.typing",
+    "modules.cluster_analysis",
+    "modules.utilities",
+    "modules.processors.frame._onnx_enhancer",
+)
+
+_MISSING = object()
+
 
 def _install_import_stubs():
     sys.modules.setdefault(
@@ -57,6 +70,21 @@ def _load_face_analyser():
 
 
 class FaceAnalyserProviderConfigTests(unittest.TestCase):
+    def setUp(self):
+        previous = {
+            name: sys.modules.get(name, _MISSING)
+            for name in _STUBBED_PROJECT_MODULES
+        }
+        self.addCleanup(self._restore_project_modules, previous)
+
+    @staticmethod
+    def _restore_project_modules(previous):
+        for name, module in previous.items():
+            if module is _MISSING:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
     def test_uses_cpu_provider_for_directml_face_analysis(self):
         face_analyser = _load_face_analyser()
         face_analyser.modules.globals.execution_providers = ["DmlExecutionProvider"]
@@ -74,6 +102,16 @@ class FaceAnalyserProviderConfigTests(unittest.TestCase):
             face_analyser.build_face_analyser_provider_config(),
             ["CUDAExecutionProvider"],
         )
+
+    def test_restores_stubbed_project_modules(self):
+        _load_face_analyser()
+        stubbed = sys.modules["modules.processors.frame._onnx_enhancer"]
+        self.assertFalse(hasattr(stubbed, "create_onnx_session"))
+
+        self.doCleanups()
+
+        restored = sys.modules.get("modules.processors.frame._onnx_enhancer")
+        self.assertIsNot(restored, stubbed)
 
 
 if __name__ == "__main__":
