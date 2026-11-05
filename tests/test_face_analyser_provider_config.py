@@ -2,6 +2,8 @@ import importlib
 import sys
 import types
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 
 
 def _install_import_stubs():
@@ -50,29 +52,48 @@ def _install_import_stubs():
     )
 
 
+@contextmanager
 def _load_face_analyser():
-    _install_import_stubs()
-    sys.modules.pop("modules.face_analyser", None)
-    return importlib.import_module("modules.face_analyser")
+    """Import ``modules.face_analyser`` on top of stubbed dependencies.
+
+    The stubs only live for the duration of the block: ``sys.modules`` is
+    restored on exit, so tests running afterwards still get the real modules
+    (for example ``modules.processors.frame._onnx_enhancer`` with
+    ``create_onnx_session``) instead of the reduced stubs used here.
+    """
+    with patch.dict(sys.modules):
+        _install_import_stubs()
+        sys.modules.pop("modules.face_analyser", None)
+        yield importlib.import_module("modules.face_analyser")
 
 
 class FaceAnalyserProviderConfigTests(unittest.TestCase):
     def test_uses_cpu_provider_for_directml_face_analysis(self):
-        face_analyser = _load_face_analyser()
-        face_analyser.modules.globals.execution_providers = ["DmlExecutionProvider"]
+        with _load_face_analyser() as face_analyser:
+            face_analyser.modules.globals.execution_providers = ["DmlExecutionProvider"]
 
-        self.assertEqual(
-            face_analyser.build_face_analyser_provider_config(),
-            ["CPUExecutionProvider"],
-        )
+            self.assertEqual(
+                face_analyser.build_face_analyser_provider_config(),
+                ["CPUExecutionProvider"],
+            )
 
     def test_preserves_existing_provider_config_for_non_directml(self):
-        face_analyser = _load_face_analyser()
-        face_analyser.modules.globals.execution_providers = ["CUDAExecutionProvider"]
+        with _load_face_analyser() as face_analyser:
+            face_analyser.modules.globals.execution_providers = ["CUDAExecutionProvider"]
 
-        self.assertEqual(
-            face_analyser.build_face_analyser_provider_config(),
-            ["CUDAExecutionProvider"],
+            self.assertEqual(
+                face_analyser.build_face_analyser_provider_config(),
+                ["CUDAExecutionProvider"],
+            )
+
+    def test_import_stubs_do_not_leak_into_sys_modules(self):
+        with _load_face_analyser():
+            pass
+
+        enhancer = sys.modules.get("modules.processors.frame._onnx_enhancer")
+        self.assertFalse(
+            enhancer is not None and not hasattr(enhancer, "create_onnx_session"),
+            "stubbed _onnx_enhancer module leaked into sys.modules",
         )
 
 
