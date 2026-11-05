@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import platform as _platform
 import sys
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 IS_WINDOWS: bool = _platform.system() == "Windows"
 IS_MACOS: bool = _platform.system() == "Darwin"
@@ -49,6 +49,37 @@ OPENVINO_PROVIDER_CONFIG = (
     "OpenVINOExecutionProvider",
     {"device_type": "AUTO:GPU,NPU,CPU"},
 )
+
+
+# FP16 inference needs native half-precision support.  NVIDIA GPUs provide
+# it from Volta onwards (compute capability 7.0); older cards emulate half
+# precision and can return NaNs instead of results.
+FP16_MIN_COMPUTE_CAPABILITY: Tuple[int, int] = (7, 0)
+
+
+def cuda_device_capability() -> Optional[Tuple[int, int]]:
+    """Compute capability of the active CUDA device.
+
+    Returns ``None`` when no CUDA device is usable.
+    """
+    try:
+        import torch  # noqa: WPS433 — local import, avoid hard dep at module load
+        if not torch.cuda.is_available():
+            return None
+        major, minor = torch.cuda.get_device_capability(0)
+        return (int(major), int(minor))
+    except Exception:
+        return None
+
+
+def supports_fp16_inference() -> bool:
+    """True when the active CUDA device can run FP16 models reliably.
+
+    GPUs older than :data:`FP16_MIN_COMPUTE_CAPABILITY` emulate half
+    precision, so FP16 models can produce NaNs on them.
+    """
+    capability = cuda_device_capability()
+    return capability is not None and capability >= FP16_MIN_COMPUTE_CAPABILITY
 
 
 def camera_backends() -> List[Tuple[int, int]]:

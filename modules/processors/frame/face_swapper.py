@@ -17,7 +17,7 @@ from modules.utilities import (
 )
 from modules.cluster_analysis import find_closest_centroid
 from modules.gpu_processing import gpu_gaussian_blur, gpu_sharpen, gpu_add_weighted, gpu_resize
-from modules.platform_info import OPENVINO_PROVIDER_CONFIG
+from modules.platform_info import OPENVINO_PROVIDER_CONFIG, supports_fp16_inference
 import os
 from collections import deque
 import time
@@ -201,9 +201,17 @@ def pre_check() -> bool:
 
     from modules.model_downloader import ensure_any
 
-    variants = ["inswapper_128.onnx", "inswapper_128_fp16.onnx"]
-    if _HAS_TORCH_CUDA:
-        variants.reverse()
+    if not _HAS_TORCH_CUDA:
+        # No CUDA: the FP32 model is preferred, FP16 is accepted as a fallback.
+        variants = ["inswapper_128.onnx", "inswapper_128_fp16.onnx"]
+    elif supports_fp16_inference():
+        # FP16 is safe on this GPU: prefer it, but accept a manually placed
+        # FP32 model.
+        variants = ["inswapper_128_fp16.onnx", "inswapper_128.onnx"]
+    else:
+        # This GPU has no native FP16 support (older cards emulate half
+        # precision and can emit NaNs), so only the FP32 model is usable.
+        variants = ["inswapper_128.onnx"]
     if ensure_any(variants) is None:
         update_status(
             "Could not obtain the inswapper model. Place inswapper_128.onnx in "
@@ -230,26 +238,44 @@ def pre_start() -> bool:
     return True
 
 
+def _select_swapper_model() -> Optional[str]:
+    """Pick the inswapper model file this device should load.
+
+    FP16 (``inswapper_128_fp16.onnx``) is faster but needs native
+    half-precision support, which NVIDIA GPUs provide from Volta onwards.
+    Older CUDA cards emulate half precision and can produce NaNs, so they
+    fall back to the FP32 model.  Without CUDA the FP32 model stays the
+    default and FP16 is only used when it is the model at hand.
+    """
+    fp32_path = os.path.join(models_dir, "inswapper_128.onnx")
+    fp16_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
+    if _HAS_TORCH_CUDA:
+        if supports_fp16_inference() and os.path.exists(fp16_path):
+            return fp16_path
+        if os.path.exists(fp32_path):
+            return fp32_path
+        return None
+    if os.path.exists(fp32_path):
+        return fp32_path
+    return fp16_path if os.path.exists(fp16_path) else None
+
+
 def get_face_swapper() -> Any:
     global FACE_SWAPPER
 
     with THREAD_LOCK:
         if FACE_SWAPPER is None:
-            # Prefer FP16 on GPUs with Tensor Cores (Turing+) — half the
-            # memory bandwidth, faster inference.  Fall back to FP32 for
-            # older GPUs (e.g. GTX 16xx) where FP16 can produce NaN.
-            fp32_path = os.path.join(models_dir, "inswapper_128.onnx")
-            fp16_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
-            use_fp16 = _HAS_TORCH_CUDA and os.path.exists(fp16_path)
-            if use_fp16:
-                model_path = fp16_path
-            elif os.path.exists(fp32_path):
-                model_path = fp32_path
-            else:
+            # Prefer FP16 on GPUs with native half-precision support
+            # (Volta/Turing+, half the memory bandwidth, faster inference).
+            # Fall back to FP32 for older GPUs (e.g. GTX 10xx) where FP16
+            # can produce NaN.
+            model_path = _select_swapper_model()
+            if model_path is None:
+                # No usable model on disk yet - fetch one and pick again.
                 if not pre_check():
                     return None
-                model_path = fp16_path if os.path.exists(fp16_path) else fp32_path
-                if not os.path.exists(model_path):
+                model_path = _select_swapper_model()
+                if model_path is None:
                     update_status(f"No inswapper model found in {models_dir}.", NAME)
                     return None
             # On Apple Silicon, rewrite Pad(reflect) → Slice+Concat so
